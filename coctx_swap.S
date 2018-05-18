@@ -22,35 +22,36 @@
 #endif
 coctx_swap:
 
+// 摘抄自: http://kaiyuan.me/2017/07/10/libco/
 #if defined(__i386__)
-	leal 4(%esp), %eax //sp 
-	movl 4(%esp), %esp 
-	leal 32(%esp), %esp //parm a : &regs[7] + sizeof(void*)
+	leal 4(%esp), %eax //sp eax = old_esp + 4
+	movl 4(%esp), %esp // 将 esp 的值设为 &ctx1
+	leal 32(%esp), %esp //parm a : &regs[7] + sizeof(void*)  esp = (char*)&ctx1 + 32
 
-	pushl %eax //esp ->parm a 
+	pushl %eax //esp ->parm a  ctx1->regs[EAX] = %eax
 
-	pushl %ebp
-	pushl %esi
-	pushl %edi
-	pushl %edx
-	pushl %ecx
-	pushl %ebx
-	pushl -4(%eax)
+	pushl %ebp  // ctx1->regs[EBP] = %ebp
+	pushl %esi  // ctx1->regs[ESI] = %esi
+	pushl %edi  // ctx1->regs[EDI] = %edi
+	pushl %edx  // ctx1->regs[EDX] = %edx
+	pushl %ecx  // ctx1->regs[ECX] = %ecx
+	pushl %ebx  // ctx1->regs[EBX] = %ebx
+	pushl -4(%eax)  // ctx1->regs[EIP] = RA，注意: %eax-4=%old_esp
 
 	
-	movl 4(%eax), %esp //parm b -> &regs[0]
+	movl 4(%eax), %esp //parm b -> &regs[0]  将 esp 的值设为 &ctx2，即ctx2的地址
 
-	popl %eax  //ret func addr
-	popl %ebx  
-	popl %ecx
-	popl %edx
-	popl %edi
-	popl %esi
-	popl %ebp
-	popl %esp
-	pushl %eax //set ret func addr
+	popl %eax  //ret func addr  %eax = ctx1->regs[EIP]，也就是 &pfn
+	popl %ebx  // %ebx = ctx1->regs[EBP]
+	popl %ecx  // %ecx = ctx1->regs[ECX]
+	popl %edx  // %edx = ctx1->regs[EDX]
+	popl %edi  // %edi = ctx1->regs[EDI]
+	popl %esi  // %esi = ctx1->regs[ESI]
+	popl %ebp  // %ebp = ctx1->regs[EBP]
+	popl %esp  // %esp = ctx1->regs[ESP]，即(char*)(sp) - sizeof(void*)
+	pushl %eax //set ret func addr  RA = %eax = &pfn，注意此时esp已经指向了新的esp
 
-	xorl %eax, %eax
+	xorl %eax, %eax  // reset eax
 	ret
 
 #elif defined(__x86_64__)

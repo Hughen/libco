@@ -48,12 +48,16 @@ using namespace std;
 stCoRoutine_t *GetCurrCo( stCoRoutineEnv_t *env );
 struct stCoEpoll_t;
 
+/*
+ * pCallStack[iCallStackSize - 1]永远指向当前正在执行的协程
+ * */
 struct stCoRoutineEnv_t
 {
-	stCoRoutine_t *pCallStack[ 128 ];
-	int iCallStackSize;
-	stCoEpoll_t *pEpoll;
+	stCoRoutine_t *pCallStack[ 128 ];       // 所有协程构成一个“栈”，只不过时用数组实现的而已
+	int iCallStackSize;         // 当前线程中协程的总数，其最大值为数组pCallStack的长度: sizeof(pCallStack)/sizeof(pCallStack[0])
+	stCoEpoll_t *pEpoll;        // 该线程内的epoll实例，协程调度器(套接字通过该结构内的epoll句柄向内核注册事件), 也用于该线程的事件循环eventloop中
 
+    // 在使用共享栈模式拷贝栈内存时记录相应的协程
 	//for copy stack log lastco and nextco
 	stCoRoutine_t* pending_co;
 	stCoRoutine_t* occupy_co;
@@ -114,10 +118,13 @@ static unsigned long long GetTickMS()
 #endif
 }
 
+/*
+ * 获取线程ID，同时设置当前在线程共享的static变量 pid(进程ID), tid(线程ID)
+ * */
 static pid_t GetPid()
 {
     static __thread pid_t pid = 0;
-    static __thread pid_t tid = 0;
+    static __thread pid_t tid = 0;		// 线程ID
     if( !pid || !tid || pid != getpid() )
     {
         pid = getpid();
@@ -336,13 +343,13 @@ struct stTimeoutItem_t
 	stTimeoutItem_t *pNext;
 	stTimeoutItemLink_t *pLink;
 
-	unsigned long long ullExpireTime;
+	unsigned long long ullExpireTime;   // 在超时发生的时候的系统时间
 
 	OnPreparePfn_t pfnPrepare;
-	OnProcessPfn_t pfnProcess;
+	OnProcessPfn_t pfnProcess;      // 事件发生时的回调函数, 其主要功能是恢复pArg指向的协程
 
-	void *pArg; // routine 
-	bool bTimeout;
+	void *pArg; // routine          // 值为协程结构stCoRoutine_t的指针, 指针指向的协程为该待检测套接字所属的协程, 在事件发生时从该值中获得并恢复协程
+	bool bTimeout;                  // 是否超时标志, true表示超时时间内套接字上没有事件发生, false表示超时时间内套接字上有事件发生
 };
 struct stTimeoutItemLink_t
 {
@@ -441,17 +448,21 @@ inline void TakeAllTimeout( stTimeout_t *apTimeout,unsigned long long allNow,stT
 
 
 }
+
+/*
+ * 协程第一次被调度执行时的入口函数，新的协程会在这里被执行
+ * */
 static int CoRoutineFunc( stCoRoutine_t *co,void * )
 {
-	if( co->pfn )
+	if( co->pfn )   // 协程函数
 	{
 		co->pfn( co->arg );
 	}
-	co->cEnd = 1;
+	co->cEnd = 1;   // 执行结束时将cEnd置为1
 
-	stCoRoutineEnv_t *env = co->env;
+	stCoRoutineEnv_t *env = co->env;    // 获取当前线程的调度器
 
-	co_yield_env( env );
+	co_yield_env( env );    // 从当前调度器的协程栈中删除最后一个协程
 
 	return 0;
 }
@@ -544,36 +555,52 @@ void co_release( stCoRoutine_t *co )
 
 void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co);
 
+/*
+ * 执行协程
+ * 将co切换到当前正在执行的位置，也就是栈的最顶端
+ * */
 void co_resume( stCoRoutine_t *co )
 {
-	stCoRoutineEnv_t *env = co->env;
-	stCoRoutine_t *lpCurrRoutine = env->pCallStack[ env->iCallStackSize - 1 ];
+	stCoRoutineEnv_t *env = co->env;    // 获取协程co的调度器
+	stCoRoutine_t *lpCurrRoutine = env->pCallStack[ env->iCallStackSize - 1 ];  // 获取当前正在运行的协程结构
 	if( !co->cStart )
 	{
+	    // 为将要运行的 co 设置上下文环境
 		coctx_make( &co->ctx,(coctx_pfn_t)CoRoutineFunc,co,0 );
 		co->cStart = 1;
 	}
-	env->pCallStack[ env->iCallStackSize++ ] = co;
+	env->pCallStack[ env->iCallStackSize++ ] = co;  // 设置 co 为运行的协程
 	co_swap( lpCurrRoutine, co );
 
 
 }
+
+/*
+ * 删除协程环境的协程数组中最后一个协程，也就是正在执行的协程
+ * */
 void co_yield_env( stCoRoutineEnv_t *env )
 {
 	
-	stCoRoutine_t *last = env->pCallStack[ env->iCallStackSize - 2 ];
-	stCoRoutine_t *curr = env->pCallStack[ env->iCallStackSize - 1 ];
+	stCoRoutine_t *last = env->pCallStack[ env->iCallStackSize - 2 ];   // 上次切换协程时，被当前协程切换出去的协程
+	stCoRoutine_t *curr = env->pCallStack[ env->iCallStackSize - 1 ];   // 当前正在执行的协程
 
-	env->iCallStackSize--;
+	env->iCallStackSize--;      // 删除当前协程
 
-	co_swap( curr, last);
+	co_swap( curr, last);       // 切换上次被切换出去的协程为当前协程
 }
 
+/*
+ * 从当前线程的协程环境中删除最后一个协程，也就是删除正在被执行的协程
+ * */
 void co_yield_ct()
 {
 
 	co_yield_env( co_get_curr_thread_env() );
 }
+
+/*
+ * 删除指定调度器的协程环境中最后一个协程，也就是删除正在被执行的协程
+ * */
 void co_yield( stCoRoutine_t *co )
 {
 	co_yield_env( co->env );
@@ -596,6 +623,18 @@ void save_stack_buffer(stCoRoutine_t* occupy_co)
 	memcpy(occupy_co->save_buffer, occupy_co->stack_sp, len);
 }
 
+/*
+ * 将当前正在被执行的协程的上下文以及状态保存到第一个参数 curr 中，
+ * 同时将二个参数 pending_co 设置成为要执行的协程，从而实现协程的切换
+ *
+ * 1. 记录当前协程 curr 的运行栈的栈顶指针，通过 char c; curr_stack_sp=&c 实现，当
+ *    下次切换回 curr 时，可以从该栈顶指针指向的位置继续，执行完 curr 后可以顺利释放该栈。
+ * 2. 处理共享栈相关的操作，并且调用函数 coctx_swap 来完成上下文环境的切换。注意执行完
+ *    coctx_swap 之后，执行流程将跳到新的 coroutine 也就是 pending_co 中运行，
+ *    后续的代码需要等下次切换回 curr 时才会执行。
+ * 3. 当下次切换回 curr 时，处理共享栈相关的操作。
+ * (摘抄自: http://kaiyuan.me/2017/07/10/libco/)
+ * */
 void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 {
  	stCoRoutineEnv_t* env = co_get_curr_thread_env();
@@ -649,25 +688,25 @@ void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co)
 struct stPollItem_t ;
 struct stPoll_t : public stTimeoutItem_t 
 {
-	struct pollfd *fds;
-	nfds_t nfds; // typedef unsigned long int nfds_t;
+	struct pollfd *fds;     // 待检测的套接字描述符集合
+	nfds_t nfds; // typedef unsigned long int nfds_t; 待检测的套接字描述符个数
 
 	stPollItem_t *pPollItems;
 
 	int iAllEventDetach;
 
-	int iEpollFd;
+	int iEpollFd;           // 由epoll_create函数创建的epoll句柄, 检测事件通过该句柄向内核通知
 
-	int iRaiseCnt;
+	int iRaiseCnt;          // 发生事件的套接字数量
 
 
 };
 struct stPollItem_t : public stTimeoutItem_t
 {
-	struct pollfd *pSelf;
-	stPoll_t *pPoll;
+	struct pollfd *pSelf;   // 待检测的套接字描述符集合
+	stPoll_t *pPoll;        // 指向存储该stPollItem_t结构的stPoll_t类型变量地址
 
-	struct epoll_event stEvent;
+	struct epoll_event stEvent;     // 待检测的套接字描述符的事件
 };
 /*
  *   EPOLLPRI 		POLLPRI    // There is urgent data to read.  
@@ -727,6 +766,9 @@ stCoRoutineEnv_t *co_get_curr_thread_env()
 	return g_arrCoEnvPerThread[ GetPid() ];
 }
 
+/*
+ * 时间发生时的回调函数，恢复pArg指向的协程
+ * */
 void OnPollProcessEvent( stTimeoutItem_t * ap )
 {
 	stCoRoutine_t *co = (stCoRoutine_t*)ap->pArg;
@@ -870,6 +912,7 @@ stCoRoutine_t *GetCurrCo( stCoRoutineEnv_t *env )
 }
 stCoRoutine_t *GetCurrThreadCo( )
 {
+    // 返回当前线程中的协程环境???
 	stCoRoutineEnv_t *env = co_get_curr_thread_env();
 	if( !env ) return 0;
 	return GetCurrCo(env);

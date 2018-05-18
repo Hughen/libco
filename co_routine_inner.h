@@ -29,10 +29,10 @@ struct stCoSpec_t
 
 struct stStackMem_t
 {
-	stCoRoutine_t* occupy_co;
-	int stack_size;
-	char* stack_bp; //stack_buffer + stack_size
-	char* stack_buffer;
+	stCoRoutine_t* occupy_co;	// 使用该栈的协程
+	int stack_size;				// 栈大小
+	char* stack_bp; //stack_buffer + stack_size，栈顶指针，栈从高地址向低地址增长
+	char* stack_buffer;			// 栈底
 
 };
 
@@ -48,21 +48,21 @@ struct stShareStack_t
 
 struct stCoRoutine_t
 {
-	stCoRoutineEnv_t *env;
-	pfn_co_routine_t pfn;
-	void *arg;
-	coctx_t ctx;
+	stCoRoutineEnv_t *env;		// 协程运行环境
+	pfn_co_routine_t pfn;		// 协程执行的逻辑函数
+	void *arg;					// 函数参数
+	coctx_t ctx;				// 保存协程的上下文
 
 	char cStart;
 	char cEnd;
 	char cIsMain;
-	char cEnableSysHook;
-	char cIsShareStack;
+	char cEnableSysHook;		// 是否运行系统 hook，即非侵入式逻辑
+	char cIsShareStack;			// 是否共享栈模式
 
 	void *pvEnv;
 
 	//char sRunStack[ 1024 * 128 ];
-	stStackMem_t* stack_mem;
+	stStackMem_t* stack_mem;	// 协程运行时的栈空间
 
 
 	//save satck buffer while confilct on same stack_buffer;
